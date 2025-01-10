@@ -86,6 +86,7 @@ mod v21 {
                             host.get_ledger_protocol_version()
                                 .expect("protocol version"),
                             sample.module.wasmi_module.engine(),
+                            sample.module.wasmtime_module.engine(),
                             &sample.wasm[..],
                             sample.module.cost_inputs.clone(),
                         )

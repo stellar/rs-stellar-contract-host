@@ -3,10 +3,10 @@ use super::{
     parsed_module::{CompilationContext, ParsedModule, VersionedContractCodeCostInputs},
 };
 use crate::{
-    budget::{get_wasmi_config, AsBudget, Budget},
+    budget::{get_wasmi_config, get_wasmtime_config, AsBudget, Budget},
     host::metered_clone::{MeteredClone, MeteredContainer},
     xdr::{Hash, ScErrorCode, ScErrorType},
-    Host, HostError, MeteredOrdMap,
+    ErrorHandler, Host, HostError, MeteredOrdMap,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -21,7 +21,9 @@ use std::{
 #[derive(Clone, Default)]
 pub struct ModuleCache {
     pub(crate) wasmi_engine: wasmi::Engine,
+    pub(crate) wasmtime_engine: wasmtime::Engine,
     pub(crate) wasmi_linker: wasmi::Linker<Host>,
+    pub(crate) wasmtime_linker: wasmtime::Linker<Host>,
     modules: ModuleCacheMap,
 }
 
@@ -106,17 +108,24 @@ impl ModuleCache {
         let wasmi_config = get_wasmi_config(host.as_budget())?;
         let wasmi_engine = wasmi::Engine::new(&wasmi_config);
 
+        let wasmtime_config = get_wasmtime_config(host.as_budget())?;
+        let wasmtime_engine = host.map_wasmtime_error(wasmtime::Engine::new(&wasmtime_config))?;
+
         let modules = ModuleCacheMap::MeteredSingleUseMap(MeteredOrdMap::new());
         let wasmi_linker = wasmi::Linker::new(&wasmi_engine);
+        let wasmtime_linker = wasmtime::Linker::new(&wasmtime_engine);
         let mut cache = Self {
             wasmi_engine,
+            wasmtime_engine,
             modules,
             wasmi_linker,
+            wasmtime_linker,
         };
 
         // Now add the contracts and rebuild linkers restricted to them.
         cache.add_stored_contracts(host)?;
         cache.wasmi_linker = cache.make_minimal_wasmi_linker_for_cached_modules(host)?;
+        cache.wasmtime_linker = cache.make_minimal_wasmtime_linker_for_cached_modules(host)?;
         Ok(cache)
     }
 
@@ -124,14 +133,21 @@ impl ModuleCache {
         let wasmi_config = get_wasmi_config(context.as_budget())?;
         let wasmi_engine = wasmi::Engine::new(&wasmi_config);
 
+        let wasmtime_config = get_wasmtime_config(context.as_budget())?;
+        let wasmtime_engine =
+            context.map_wasmtime_error(wasmtime::Engine::new(&wasmtime_config))?;
+
         let modules = ModuleCacheMap::UnmeteredReusableMap(Arc::new(Mutex::new(BTreeMap::new())));
 
         let wasmi_linker = Host::make_maximal_wasmi_linker(context, &wasmi_engine)?;
+        let wasmtime_linker = Host::make_maximal_wasmtime_linker(context, &wasmtime_engine)?;
 
         Ok(Self {
             wasmi_engine,
+            wasmtime_engine,
             modules,
             wasmi_linker,
+            wasmtime_linker,
         })
     }
 
@@ -244,6 +260,7 @@ impl ModuleCache {
             context,
             curr_ledger_protocol,
             &self.wasmi_engine,
+            &self.wasmtime_engine,
             &wasm,
             cost_inputs,
         )?;
@@ -297,6 +314,15 @@ impl ModuleCache {
     ) -> Result<wasmi::Linker<Host>, HostError> {
         self.with_minimal_import_symbols(host, |symbols| {
             Host::make_minimal_wasmi_linker_for_symbols(host, &self.wasmi_engine, symbols)
+        })
+    }
+
+    fn make_minimal_wasmtime_linker_for_cached_modules(
+        &self,
+        host: &Host,
+    ) -> Result<wasmtime::Linker<Host>, HostError> {
+        self.with_minimal_import_symbols(host, |symbols| {
+            Host::make_minimal_wasmtime_linker_for_symbols(host, &self.wasmtime_engine, symbols)
         })
     }
 
